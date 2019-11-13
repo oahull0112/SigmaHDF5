@@ -29,6 +29,8 @@ module input_m
   use epsread_hdf5_m
 #ifdef HDF5
   use hdf5
+  ! OAH: hdf5 routines:
+  use wfn_io_hdf5_m
 #endif
   use timing_m, only: timing => sigma_timing
   use inread_m
@@ -85,6 +87,7 @@ subroutine input(crys,gvec,syms,kp,wpg,sig,wfnk,iunit_c,iunit_k,fnc,fnk,wfnkqmpi
   logical :: ep_read
   logical :: do_phonq ! ZL: if do_phonq = .false., wfnk_phonq and wfnk_phonq_mpi will not
                      ! be used, nor allocated or evaluated
+  integer :: i_oh, j_oh ! OAH: for testing purposes (remove when done)
 
   PUSH_SUB(input)
   ! ZL: set up EP
@@ -231,7 +234,13 @@ subroutine input(crys,gvec,syms,kp,wpg,sig,wfnk,iunit_c,iunit_k,fnc,fnk,wfnkqmpi
 !#BEGIN_INTERNAL_ONLY
 #ifdef HDF5
     if (peinf%inode==0) write(6,'(a)') ' Reading header of WFN_inner.h5'
-    !call read_hdf5_header_type('WFN_inner.h5', sheader, iflavor, kp, gvec, syms, crys)
+    ! OAH: leave this for now because it lets us use the HDF5 file and the
+    ! binary file at the same time. Need to make all the binary calls and then
+    ! overwrite the data with the HDF5 calls so that the binary file ends up in
+    ! the right "place" when it comes time to read it in.
+    call open_file(25,file='WFN_inner',form='unformatted',status='old') ! remove
+    call read_binary_header_type(25, sheader, iflavor, kp, gvec, syms, crys) ! remove
+    call read_hdf5_header_type('WFN_inner.h5', sheader, iflavor, kp, gvec, syms, crys)
 #endif
 !#END_INTERNAL_ONLY
   else
@@ -248,6 +257,14 @@ subroutine input(crys,gvec,syms,kp,wpg,sig,wfnk,iunit_c,iunit_k,fnc,fnk,wfnkqmpi
     call read_binary_header_type(25, sheader, iflavor, kp, gvec, syms, crys)
   endif
   call check_trunc_kpts(sig%icutv, kp) ! This does not affect EP
+  if (peinf%inode==0) then
+    write(*,*) 'iflavor: ', iflavor
+    write(*,*) 'kp%nspin: ', kp%nspin, 'kp%nspinor: ', kp%nspinor
+    write(*,*) 'gvec%ng: ', gvec%ng
+    write(*,*) 'kp%el(1,1,1): ', kp%el(1,1,1)
+    write(*,*) 'kp%occ(1,1,1): ', kp%occ(1,1,1)
+    write(*,*) 'kp%rk(1,1): ', kp%rk(1,1)
+  endif
 
   if (sig%ecutb<TOL_ZERO) then
     sig%ecutb = kp%ecutwfc
@@ -331,12 +348,15 @@ subroutine input(crys,gvec,syms,kp,wpg,sig,wfnk,iunit_c,iunit_k,fnc,fnk,wfnkqmpi
   if(sig%wfn_hdf5) then
 !#BEGIN_INTERNAL_ONLY
 #ifdef HDF5
-    !call read_hdf5_gvectors('WFN_inner.h5', gvec%ng, gvec%components)
+! OAH: uncommented to enable hdf5
+    call read_binary_gvectors(25, gvec%ng, gvec%ng, gvec%components) ! remove
+    call read_hdf5_gvectors('WFN_inner.h5', gvec%ng, gvec%components)
 #endif
 !#END_INTERNAL_ONLY
   else
       call read_binary_gvectors(25, gvec%ng, gvec%ng, gvec%components)
   endif
+
 
 !-----------------------
 ! sort G-vectors with respect to their kinetic energy
@@ -361,6 +381,11 @@ subroutine input(crys,gvec,syms,kp,wpg,sig,wfnk,iunit_c,iunit_k,fnc,fnk,wfnkqmpi
     write(6,'(1x,a,i0)') '- Number of partially occ. conduction bands: ', sig%ncrit
     write(6,*)
   endif
+  ! OAH: write out the gvectors to test that it works
+  write(*,*) "Some gvector components: "
+  do i_oh = 1, 20
+    write(*,*) (gvec%components(i,j), j_oh=1,5)
+  end do
 
   if(sig%ecuts > sig%ecutb) then
     call die("The screened_coulomb_cutoff cannot be greater than the bare_coulomb_cutoff.", &
@@ -1061,13 +1086,14 @@ subroutine input(crys,gvec,syms,kp,wpg,sig,wfnk,iunit_c,iunit_k,fnc,fnk,wfnkqmpi
 !
 !-----------------------------------------------------------
 
-  if(sig%wfn_hdf5) then
-!#BEGIN_INTERNAL_ONLY
-#ifdef HDF5
-    !call read_wavefunctions_hdf5(kp, gvec, sig, iunit_v, iunit_c, wfnk, wfnkqmpi, wfnkmpi)
-#endif
-!#END_INTERNAL_ONLY
-  else
+! OAH: uncommented the below code and the endif below once things are working
+!  if(sig%wfn_hdf5) then
+!!#BEGIN_INTERNAL_ONLY
+!#ifdef HDF5
+!    !call read_wavefunctions_hdf5(kp, gvec, sig, iunit_v, iunit_c, wfnk, wfnkqmpi, wfnkmpi)
+!#endif
+!!#END_INTERNAL_ONLY
+!  else
     ! ZL: we call read_wavefunctions() only once in input()
     if(.not.ep_read) then
       if(.not.do_phonq) then
@@ -1082,7 +1108,7 @@ subroutine input(crys,gvec,syms,kp,wpg,sig,wfnk,iunit_c,iunit_k,fnc,fnk,wfnkqmpi
     if(peinf%inode.eq.0) then
       call close_file(25)
     endif
-  endif
+!  endif ! part of commented out code above (uncomment for hdf5)
 
   if(peinf%inode.eq.0) then
 ! Write out information about self-energy calculation
@@ -1113,7 +1139,7 @@ subroutine input(crys,gvec,syms,kp,wpg,sig,wfnk,iunit_c,iunit_k,fnc,fnk,wfnkqmpi
     write(6,*)
     
   endif ! node 0
- 
+
   SAFE_DEALLOCATE(isrt)
   SAFE_DEALLOCATE(isrti)
   SAFE_DEALLOCATE(kp%w)
@@ -1510,6 +1536,318 @@ subroutine read_wavefunctions(kp,gvec,sig,wfnk,iunit_c,iunit_k,fnc,fnk,wfnkqmpi,
   PUSH_SUB(read_wavefunctions)
 
 end subroutine read_wavefunctions
+
+subroutine read_hdf5_wavefunctions(kp,gvec,sig,wfnk,fnc,fnk,wfnkqmpi,wfnkmpi,ep_read_in)
+  type (kpoints), intent(in) :: kp
+  type (gspace), intent(in) :: gvec
+  type (siginfo), intent(in) :: sig
+  type (wfnkstates), intent(out) :: wfnk 
+  character*20, intent(in) :: fnc, fnk
+  type (wfnkqmpiinfo), intent(out) :: wfnkqmpi
+  type (wfnkmpiinfo), intent(out) :: wfnkmpi
+  ! ZL: for EP
+
+  character :: tmpstr*100,tmpstr1*16,tmpstr2*16
+  integer :: i,ii,j,k
+  integer :: ikn, irk
+  integer :: istore,nstore,inum,g1,g2,iknstore, istore_ep, iknstore_ep ! ZL adds istore_ep, iknstore_ep
+  integer :: ndvmax, ndvmax_l
+  integer, allocatable :: isort(:)
+  real(DP) :: qk(3)
+  SCALAR, allocatable :: zc(:,:)
+  logical :: dont_read
+  type(gspace) :: gvec_kpt
+
+  type(progress_info) :: prog_info !< a user-friendly progress report
+
+  ! ZL: electron phonon (EP)
+  logical, intent(in), optional :: ep_read_in
+  logical :: ep_read
+  integer :: induse ! index in use, for indkn or indk_phonq
+  integer :: tmpngk
+
+  PUSH_SUB(read_wavefunctions)
+
+  ! ZL: set up EP
+  ep_read = .false.
+  if(present(ep_read_in)) then
+    ep_read = ep_read_in
+  endif
+
+  SAFE_ALLOCATE(isort, (gvec%ng))
+
+  SAFE_ALLOCATE(wfnkqmpi%nkptotal, (kp%nrk))
+  SAFE_ALLOCATE(wfnkqmpi%isort, (kp%ngkmax,kp%nrk))
+  SAFE_ALLOCATE(wfnkqmpi%band_index, (peinf%ntband_max,kp%nrk))
+  SAFE_ALLOCATE(wfnkqmpi%qk, (3,kp%nrk))
+  SAFE_ALLOCATE(wfnkqmpi%el, (sig%ntband,sig%nspin,kp%nrk))
+  ! ZL: ntband_max is total number of bands distributed to each processor
+  !     wfnkqmpi%cg is distributed over bands
+  SAFE_ALLOCATE(wfnkqmpi%cg, (kp%ngkmax,peinf%ntband_max,sig%nspin*kp%nspinor,kp%nrk))
+
+  if (sig%nkn.gt.1) then  ! ZL: same logic for EP
+    ! it is using ngkmax, so same for EP, wfnkmpi%cg is distributed over ndv
+    ndvmax=peinf%ndiag_max*kp%ngkmax
+    if (mod(ndvmax,peinf%npes/peinf%npools).eq.0) then
+      ndvmax_l=ndvmax/(peinf%npes/peinf%npools)
+    else
+      ndvmax_l=ndvmax/(peinf%npes/peinf%npools)+1
+    endif
+    SAFE_ALLOCATE(wfnkmpi%nkptotal, (sig%nkn))
+    SAFE_ALLOCATE(wfnkmpi%isort, (kp%ngkmax,sig%nkn))
+    SAFE_ALLOCATE(wfnkmpi%qk, (3,sig%nkn))
+    SAFE_ALLOCATE(wfnkmpi%el, (sig%ntband,sig%nspin,sig%nkn))
+    SAFE_ALLOCATE(wfnkmpi%elda, (sig%ntband,sig%nspin,sig%nkn))
+    SAFE_ALLOCATE(wfnkmpi%cg, (ndvmax_l,sig%nspin*kp%nspinor,sig%nkn))
+  endif
+
+!-----------------------------------
+! Read in wavefunction information
+
+  SAFE_ALLOCATE(wfnk%isrtk, (gvec%ng))
+  SAFE_ALLOCATE(wfnk%ek, (sig%ntband,sig%nspin))
+  SAFE_ALLOCATE(wfnk%elda, (sig%ntband,sig%nspin))
+
+  if(.not.ep_read) then
+    call progress_init(prog_info, 'reading wavefunctions (WFN_inner)', 'state', kp%nrk*sig%ntband)
+  else
+    call progress_init(prog_info, 'reading wavefunctions (dWFN)', 'state', kp%nrk*sig%ntband)
+  endif
+
+  ! ZL: outmost loop, irk over kp%nrk
+  do irk=1,kp%nrk
+    if(.not.ep_read) then
+      write(tmpstr,*) 'Reading WFN_inner -> cond/val wfns irk=',irk
+    else
+      write(tmpstr,*) 'Reading dWFN -> cond/val wfns irk=',irk
+    endif
+    call logit(tmpstr)
+    qk(:)=kp%rk(:,irk)
+
+!----------------------------
+! Read in and sort gvectors
+    SAFE_ALLOCATE(gvec_kpt%components, (3, kp%ngk(irk)))
+    call timing%start(timing%input_read)
+    call read_binary_gvectors(25, kp%ngk(irk), kp%ngk(irk), gvec_kpt%components)
+    call timing%stop(timing%input_read)
+
+    do i = 1, kp%ngk(irk)
+      call findvector(isort(i), gvec_kpt%components(:, i), gvec)
+      if (isort(i) .eq. 0) then
+        write(0,*) 'could not find gvec', kp%ngk(irk), i, gvec_kpt%components(1:3, i)
+        call die('findvector')
+      endif
+    enddo
+    SAFE_DEALLOCATE_P(gvec_kpt%components)
+ 
+!--------------------------------------------------------
+! Determine if Sigma must be computed for this k-point.
+! If so, store the bands and wavefunctions on file iunit_k.
+! If there is only one k-point, store directly in wfnk.
+
+    istore=0
+    do ikn=1,sig%nkn ! ZL: here we take advantage that we implement for one phonq point for now
+                     !     otherwize, need another outer loop: do ikn=1,sig%nkn*sig%nphonq
+      if(sig%indkn(ikn).eq.irk) then  ! ZL: KEY if-statement: here it judges whether store wfnkmpi
+        istore=1  ! ZL: for a given irk point, only one ind(ikn) index can match
+        iknstore=ikn ! ZL: and this ind(ikn) is recorded as iknstore
+
+        wfnk%nkpt=kp%ngk(irk)
+        wfnk%ndv=peinf%ndiag_max*kp%ngk(irk)
+        wfnk%k(:)=qk(:)
+        wfnk%isrtk(:)=isort(:)
+        do k=1,sig%nspin
+          wfnk%ek(1:sig%ntband,k)= &
+            kp%el(1+ sig%ncore_excl:sig%ntband+ sig%ncore_excl,irk,sig%spin_index(k))
+          wfnk%elda(1:sig%ntband,k)= &
+            kp%elda(1:sig%ntband,irk,sig%spin_index(k))
+        enddo
+        SAFE_ALLOCATE(wfnk%zk, (wfnk%ndv,sig%nspin*kp%nspinor))
+        wfnk%zk=ZERO
+      endif
+
+    enddo ! ikn
+
+    ! ZL: nkptotal is ngk
+    wfnkqmpi%nkptotal(irk) = kp%ngk(irk)
+    wfnkqmpi%isort(1:kp%ngk(irk),irk) = isort(1:kp%ngk(irk)) 
+    do k = 1, sig%nspin
+      wfnkqmpi%el(1:sig%ntband,k,irk) = &
+        kp%el(1+ sig%ncore_excl:sig%ntband+ sig%ncore_excl,irk,sig%spin_index(k))
+    enddo
+    wfnkqmpi%qk(1:3,irk) = qk(1:3)
+
+!-------------------------------------------------------------------------
+! SIB:  Read wave functions from file WFN_inner (ZL: or dWFN) (unit=25) and have
+! the appropriate processor write it to iunit_c after checking norm.
+! The wavefunctions for bands where Sigma matrix elements are
+! requested are stored in wfnk%zk for later writing to unit iunit_k.
+! If band index is greater than sig%ntband, we will actually
+! not do anything with this band (see code below).
+!  We still have to read it though, in order
+! to advance the file to get to the data for the next k-point.
+
+    SAFE_ALLOCATE(zc, (kp%ngk(irk), kp%nspin*kp%nspinor))
+
+    inum=0
+    do i=1,kp%mnband
+
+      call timing%start(timing%input_read)
+
+! DVF: don`t read deep core states. 
+      dont_read = (i > sig%ntband+sig%ncore_excl .or. i <= sig%ncore_excl)
+
+      call read_binary_data(25, kp%ngk(irk), kp%ngk(irk), kp%nspin*kp%nspinor, zc, dont_read = dont_read)
+
+      call timing%stop(timing%input_read)
+
+      if (.not.dont_read) then
+        call progress_step(prog_info, sig%ntband*(irk-1) + i)
+        if(peinf%inode.eq.0) then
+          do k=1,sig%nspin
+            if(.not.ep_read) then
+              call checknorm('WFN_inner',i,irk,kp%ngk(irk),k,kp%nspinor,zc(:,:))
+            endif
+          enddo
+        endif
+
+        nstore=0  ! ZL: for bands
+        do j=1,peinf%ndiag_max
+          if (.not.peinf%flag_diag(j)) cycle
+          if (i==sig%diag(peinf%index_diag(j))) nstore=j
+        enddo
+
+        ! ZL: if this is the kpoint in outer, save in wfnk
+        if((istore.eq.1).and.(nstore.ne.0)) then
+          do k=1,sig%nspin*kp%nspinor
+            do j=1,kp%ngk(irk)
+              wfnk%zk((nstore-1)*kp%ngk(irk)+j,k) = zc(j,sig%spin_index(k))
+            enddo
+          enddo
+        endif
+
+        ! ZL: for do_phonq
+        if(do_phonq.and.(istore_ep.eq.1).and.(nstore.ne.0)) then
+          do k=1,sig%nspin*kp%nspinor
+            do j=1,kp%ngk(irk)
+              wfnk_phonq%zk((nstore-1)*kp%ngk(irk)+j,k) = zc(j,sig%spin_index(k))
+            enddo
+          enddo
+        endif
+
+! DVF : i is indexed including the deep core states (since it runs over all the bands
+! in the wavefunction), while the indexing arrays
+! are not. We have to subtract sig%ncore_excl from i to get the right states. 
+        j=0  ! ZL: index to decide if save this band
+        do ii=1,peinf%ntband_node
+          if (peinf%indext(ii)==i-sig%ncore_excl) j=1
+        enddo
+
+        call timing%start(timing%input_write)
+
+        if (j.eq.1) then
+          inum=inum+1
+          wfnkqmpi%band_index(inum,irk)=i-sig%ncore_excl
+          do k=1,sig%nspin*kp%nspinor
+            wfnkqmpi%cg(1:kp%ngk(irk),inum,k,irk)= &
+              zc(1:kp%ngk(irk),sig%spin_index(k))
+          enddo
+        endif
+
+        call timing%stop(timing%input_write)
+      else
+        ! FHJ: the following lines were introduced in r6294 and are supposed to
+        ! be a shortcut if we are past the last band of the last k-point. However,
+        ! in light of a previous bug (#223), this feature is commented out for now.
+        !! FHJ: shortcut if this is past the last band of the last k-point
+        !if (irk==kp%nrk) exit
+      endif
+      
+    enddo ! i (loop over bands) ZL: kp%mnband
+    SAFE_DEALLOCATE(zc)
+
+    ! ZL: this is the needed kpoint for wfnkmpi, copy from wfnk to wfnkmpi
+    if((istore.eq.1).and.(sig%nkn.gt.1)) then  ! ZL: here it stores wfnkmpi
+
+      call timing%start(timing%input_write)
+
+      ikn=iknstore
+      wfnkmpi%nkptotal(ikn)=kp%ngk(irk)
+      wfnkmpi%isort(1:kp%ngk(irk),ikn)=wfnk%isrtk(1:kp%ngk(irk))
+      wfnkmpi%qk(1:3,ikn)=qk(1:3)
+      wfnkmpi%el(1:sig%ntband,1:sig%nspin,ikn)= &
+        wfnk%ek(1:sig%ntband,1:sig%nspin)
+      wfnkmpi%elda(1:sig%ntband,1:sig%nspin,ikn)= &
+        wfnk%elda(1:sig%ntband,1:sig%nspin)
+      do k=1,sig%nspin*kp%nspinor
+#ifdef MPI
+        i=mod(peinf%inode,peinf%npes/peinf%npools)
+        if (mod(wfnk%ndv,peinf%npes/peinf%npools).eq.0) then
+          j=wfnk%ndv/(peinf%npes/peinf%npools)
+        else
+          j=wfnk%ndv/(peinf%npes/peinf%npools)+1
+        endif
+        g1=1+i*j
+        g2=min(j+i*j,wfnk%ndv)
+        if (g2.ge.g1) then
+          wfnkmpi%cg(1:g2-g1+1,k,ikn)=wfnk%zk(g1:g2,k)
+        endif ! g2.ge.g1
+#else
+        wfnkmpi%cg(1:wfnk%ndv,k,ikn)=wfnk%zk(1:wfnk%ndv,k)
+#endif
+      enddo
+
+      call timing%stop(timing%input_write)
+
+      ! ZL: if sig%nkn.gt.1, clean wfnk%zk, otherwise (only one kpoint in outer) we keep it
+      SAFE_DEALLOCATE_P(wfnk%zk)
+    endif
+ 
+    ! ZL: for do_phonq
+    if(do_phonq.and.(istore_ep.eq.1).and.(sig%nkn.gt.1)) then
+
+      call timing%start(timing%input_write)
+
+      ikn=iknstore_ep
+      wfnk_phonq_mpi%nkptotal(ikn)=kp%ngk(irk)
+      wfnk_phonq_mpi%isort(1:kp%ngk(irk),ikn)=wfnk_phonq%isrtk(1:kp%ngk(irk))
+      wfnk_phonq_mpi%qk(1:3,ikn)=wfnk_phonq%k(:)
+      wfnk_phonq_mpi%el(1:sig%ntband,1:sig%nspin,ikn)= &
+        wfnk_phonq%ek(1:sig%ntband,1:sig%nspin)
+      wfnk_phonq_mpi%elda(1:sig%ntband,1:sig%nspin,ikn)= &
+        wfnk_phonq%elda(1:sig%ntband,1:sig%nspin)
+      do k=1,sig%nspin*kp%nspinor
+#ifdef MPI
+        i=mod(peinf%inode,peinf%npes/peinf%npools)
+        if (mod(wfnk_phonq%ndv,peinf%npes/peinf%npools).eq.0) then
+          j=wfnk_phonq%ndv/(peinf%npes/peinf%npools)
+        else
+          j=wfnk_phonq%ndv/(peinf%npes/peinf%npools)+1
+        endif
+        g1=1+i*j
+        g2=min(j+i*j,wfnk_phonq%ndv)
+        if (g2.ge.g1) then
+          wfnk_phonq_mpi%cg(1:g2-g1+1,k,ikn)=wfnk_phonq%zk(g1:g2,k)
+        endif ! g2.ge.g1
+#else
+        wfnk_phonq_mpi%cg(1:wfnk_phonq%ndv,k,ikn)=wfnk_phonq%zk(1:wfnk_phonq%ndv,k)
+#endif
+      enddo
+
+      call timing%stop(timing%input_write)
+
+      ! ZL: if sig%nkn.gt.1, remove wfnk%zk, otherwise (only one kpoint in outer) we keep it
+      SAFE_DEALLOCATE_P(wfnk_phonq%zk)
+    endif
+
+  enddo ! irk (loop over k-points)
+  call progress_free(prog_info)
+
+  SAFE_DEALLOCATE(isort)
+
+  PUSH_SUB(read_wavefunctions)
+
+end subroutine read_hdf5_wavefunctions
 
 
 end module input_m
