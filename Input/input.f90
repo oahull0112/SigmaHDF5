@@ -1617,23 +1617,15 @@ subroutine read_wavefunctions_hdf5(kp, gvec, sig, iunit_c, iunit_k, fnc, fnk, wf
   ! ZL: set up EP
   ep_read = .false.
 
-  write(*,*) "inside routine 0, gvec%ng: ", gvec%ng
   SAFE_ALLOCATE(isort, (gvec%ng))
-  write(*,*) "inside routine 1, kp%nrk: ", kp%nrk
   SAFE_ALLOCATE(wfnkqmpi%nkptotal, (kp%nrk))
-  write(*,*) "inside routine 2, kp%ngkmax, kp%nrk",kp%ngkmax,kp%nrk
   SAFE_ALLOCATE(wfnkqmpi%isort, (kp%ngkmax,kp%nrk))
-  write(*,*) "inside routine 3, peinf%ntband_max,kp%nrk", peinf%ntband_max,kp%nrk
   SAFE_ALLOCATE(wfnkqmpi%band_index, (peinf%ntband_max,kp%nrk))
-  write(*,*) "inside routine 4"
   SAFE_ALLOCATE(wfnkqmpi%qk, (3,kp%nrk))
-  write(*,*) "inside routine 5"
   SAFE_ALLOCATE(wfnkqmpi%el, (sig%ntband,sig%nspin,kp%nrk))
   ! ZL: ntband_max is total number of bands distributed to each processor
   !     wfnkqmpi%cg is distributed over bands
-  write(*,*) "inside routine 6"
   SAFE_ALLOCATE(wfnkqmpi%cg, (kp%ngkmax,peinf%ntband_max,sig%nspin*kp%nspinor,kp%nrk))
-  write(*,*) "inside routine 7"
 
   ! OAH: I think because if there is only one k point then q=k, but for more
   ! than one kpoint, don't have q anymore (or k points beyond the first, don't
@@ -1738,13 +1730,26 @@ subroutine read_wavefunctions_hdf5(kp, gvec, sig, iunit_c, iunit_k, fnc, fnk, wf
 
   end do ! first irk loop
 
-!  call logit("Before interface setup")
-!  call hdf5_open_file('WFN_inner.h5', 'r', file_id, parallel_io=.true.)
+  call logit("Before interface setup")
+  call hdf5_open_file('WFN_inner.h5', 'r', file_id, parallel_io=.true.)
 !  ! OAH: for below call need to figure out the sigma equivalent to
 !  ! peinf%does_it_ownv/c and how to handle ib_first
-!  ib_first=peinf%indext_dist(1, peinf%my_pool)
-!  call read_hdf5_bands_block(file_id, kp, peinf%ntband_max, peinf%ntband_node, peinf%does_it_ownt, &
-!    ib_first, wfns)
+  ib_first=peinf%indext_dist(1, peinf%pool_rank+1)
+  if (peinf%inode==0) then
+    write(*,*) "peinf%indext_dist:"
+    do i_oh=1,peinf%ntband_max
+      write(*,*) (peinf%indext_dist(i_oh,j_oh), j_oh=1,peinf%npes_pool)
+    enddo
+  endif
+  write(*,*) "ib_first inside input: ", ib_first, "for " , peinf%inode
+  call read_hdf5_bands_block(file_id, kp, peinf%ntband_max, peinf%ntband_node, peinf%does_it_ownt,&
+    ib_first, wfns)
+
+  if (peinf%inode==0) then
+    write(*,*) "part of wfns: "
+    write(*,*) "wfns(1,1,1): ", wfns(1,1,1)
+  endif
+
 
 !--------------------------------------------------------
 ! Determine if Sigma must be computed for this k-point.
