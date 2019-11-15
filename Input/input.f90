@@ -30,6 +30,7 @@ module input_m
 #ifdef HDF5
   use hdf5
   ! OAH: hdf5 routines:
+  use hdf5_io_m
   use wfn_io_hdf5_m
 #endif
   use timing_m, only: timing => sigma_timing
@@ -382,10 +383,13 @@ subroutine input(crys,gvec,syms,kp,wpg,sig,wfnk,iunit_c,iunit_k,fnc,fnk,wfnkqmpi
     write(6,*)
   endif
   ! OAH: write out the gvectors to test that it works
-  write(*,*) "Some gvector components: "
-  do i_oh = 1, 20
-    write(*,*) (gvec%components(i,j), j_oh=1,5)
-  end do
+  if (peinf%inode==0) then
+    write(*,*) "sig%wfn_hdf5: ", sig%wfn_hdf5
+    write(*,*) "Some gvector components: "
+    do i_oh = 1, 20
+      write(*,*) (gvec%components(i_oh,j_oh), j_oh=1,2)
+    end do
+  endif
 
   if(sig%ecuts > sig%ecutb) then
     call die("The screened_coulomb_cutoff cannot be greater than the bare_coulomb_cutoff.", &
@@ -939,6 +943,7 @@ subroutine input(crys,gvec,syms,kp,wpg,sig,wfnk,iunit_c,iunit_k,fnc,fnk,wfnkqmpi
 !  SAFE_DEALLOCATE(ranks)
 #endif
 
+  write(*,*)"SIG%NOFFDIAG: ", sig%noffdiag
   if (sig%noffdiag.gt.0) then
     if (mod(sig%noffdiag,peinf%npools).eq.0) then
       peinf%noffdiag_max=sig%noffdiag/peinf%npools
@@ -991,6 +996,11 @@ subroutine input(crys,gvec,syms,kp,wpg,sig,wfnk,iunit_c,iunit_k,fnc,fnk,wfnkqmpi
 
   SAFE_ALLOCATE(peinf%indext_dist, (peinf%ntband_max,peinf%npes_pool))
   SAFE_ALLOCATE(peinf%ntband_dist, (peinf%npes_pool))
+
+  ! OAH: need a doesi_it_ownt for hdf5 functionality
+  ! OAH: may need to initialize? (to t/f)
+  SAFE_ALLOCATE(peinf%does_it_ownt, (sig%ntband, peinf%npes))
+  peinf%does_it_ownt=.false.
   
   peinf%ntband_node=0
   peinf%ntband_dist=0
@@ -1003,6 +1013,13 @@ subroutine input(crys,gvec,syms,kp,wpg,sig,wfnk,iunit_c,iunit_k,fnc,fnk,wfnkqmpi
       ! This is more efficient for the parallel IO. Eg: for 2  bands/processor,
       ! v1->PE0, v2->PE0, v3->PE1, etc.
       ipe = (ii-1)/peinf%ntband_max
+      ! OAH: generate does_it_ownt
+      do jj = 0, peinf%npools - 1
+        !ipe+(peinf%npes/peinf%npools)*jj --> rank in pool + (# in pool)*jj
+        ! so that it iterates through the processor in each pool that owns these
+        ! bands and assigns the band as true.
+        peinf%does_it_ownt(ii, (ipe+(peinf%npes/peinf%npools)*jj)+1)=.true. 
+      enddo
       if (peinf%pool_rank.eq.ipe) then
         peinf%ntband_node=peinf%ntband_node+1
         if(ii.le.(sig%nvband+sig%ncrit)) then
@@ -1013,7 +1030,17 @@ subroutine input(crys,gvec,syms,kp,wpg,sig,wfnk,iunit_c,iunit_k,fnc,fnk,wfnkqmpi
       peinf%ntband_dist(ipe+1)=peinf%ntband_dist(ipe+1)+1
       peinf%indext_dist(peinf%ntband_dist(ipe+1),ipe+1)=ii
   enddo
+  ! OAH: check does_it_ownt
+  if (peinf%inode==0) then
+    write(*,*) "does_it_ownt: "
+    do i_oh = 1, sig%ntband
+      write(*,*) (peinf%does_it_ownt(i_oh,j_oh), j_oh=1,peinf%npes)
+    end do
+  endif
+
+
 #ifdef MPI
+  peinf%verb_debug=.true. ! OAH remove when done testing
   if (peinf%verb_debug) then
     call logit('Begin distrib report')
     FLUSH(0)
@@ -1087,13 +1114,19 @@ subroutine input(crys,gvec,syms,kp,wpg,sig,wfnk,iunit_c,iunit_k,fnc,fnk,wfnkqmpi
 !-----------------------------------------------------------
 
 ! OAH: uncommented the below code and the endif below once things are working
-!  if(sig%wfn_hdf5) then
-!!#BEGIN_INTERNAL_ONLY
-!#ifdef HDF5
-!    !call read_wavefunctions_hdf5(kp, gvec, sig, iunit_v, iunit_c, wfnk, wfnkqmpi, wfnkmpi)
-!#endif
+  if(sig%wfn_hdf5) then
+!#BEGIN_INTERNAL_ONLY
+#ifdef HDF5
+write(*,*) "to before read in call"
+    call read_wavefunctions_hdf5(kp, gvec, sig, iunit_c, iunit_k, fnc, fnk, wfnk, wfnkqmpi, wfnkmpi) 
+    ! OAH: get rid of this once all binary stuff removed from hdf5
+    if(peinf%inode.eq.0) then
+      call close_file(25)
+    endif
+!call read_wavefunctions_hdf5(kp, gvec, sig, iunit_v, iunit_c, wfnk, wfnkqmpi, wfnkmpi)
+#endif
 !!#END_INTERNAL_ONLY
-!  else
+  else
     ! ZL: we call read_wavefunctions() only once in input()
     if(.not.ep_read) then
       if(.not.do_phonq) then
@@ -1108,7 +1141,7 @@ subroutine input(crys,gvec,syms,kp,wpg,sig,wfnk,iunit_c,iunit_k,fnc,fnk,wfnkqmpi
     if(peinf%inode.eq.0) then
       call close_file(25)
     endif
-!  endif ! part of commented out code above (uncomment for hdf5)
+  endif ! part of commented out code above (uncomment for hdf5)
 
   if(peinf%inode.eq.0) then
 ! Write out information about self-energy calculation
@@ -1537,11 +1570,13 @@ subroutine read_wavefunctions(kp,gvec,sig,wfnk,iunit_c,iunit_k,fnc,fnk,wfnkqmpi,
 
 end subroutine read_wavefunctions
 
-subroutine read_hdf5_wavefunctions(kp,gvec,sig,wfnk,fnc,fnk,wfnkqmpi,wfnkmpi,ep_read_in)
+! OAH: will remove fnc, fnk from routine when done
+subroutine read_wavefunctions_hdf5(kp, gvec, sig, iunit_c, iunit_k, fnc, fnk, wfnk, wfnkqmpi, wfnkmpi)
   type (kpoints), intent(in) :: kp
   type (gspace), intent(in) :: gvec
   type (siginfo), intent(in) :: sig
   type (wfnkstates), intent(out) :: wfnk 
+  integer, intent(in) :: iunit_c, iunit_k ! these will stay
   character*20, intent(in) :: fnc, fnk
   type (wfnkqmpiinfo), intent(out) :: wfnkqmpi
   type (wfnkmpiinfo), intent(out) :: wfnkmpi
@@ -1561,30 +1596,48 @@ subroutine read_hdf5_wavefunctions(kp,gvec,sig,wfnk,fnc,fnk,wfnkqmpi,wfnkmpi,ep_
   type(progress_info) :: prog_info !< a user-friendly progress report
 
   ! ZL: electron phonon (EP)
-  logical, intent(in), optional :: ep_read_in
   logical :: ep_read
   integer :: induse ! index in use, for indkn or indk_phonq
   integer :: tmpngk
+
+  ! OAH: stuff for HDF5-specific routine
+  integer :: ngktot, istart, ig
+  SCALAR, allocatable :: wfns(:,:,:)
+  integer, allocatable :: components(:,:)
+  integer, allocatable :: temp_components(:,:) ! OAH remove when done -- this is
+  ! only to advance the binary file during testing phases.
+  integer(HID_T) :: file_id
+  integer(HID_T) :: plist_id
+  integer :: error
+  integer :: i_oh, j_oh ! OAH remove when done
+  integer :: ib_first
 
   PUSH_SUB(read_wavefunctions)
 
   ! ZL: set up EP
   ep_read = .false.
-  if(present(ep_read_in)) then
-    ep_read = ep_read_in
-  endif
 
+  write(*,*) "inside routine 0, gvec%ng: ", gvec%ng
   SAFE_ALLOCATE(isort, (gvec%ng))
-
+  write(*,*) "inside routine 1, kp%nrk: ", kp%nrk
   SAFE_ALLOCATE(wfnkqmpi%nkptotal, (kp%nrk))
+  write(*,*) "inside routine 2, kp%ngkmax, kp%nrk",kp%ngkmax,kp%nrk
   SAFE_ALLOCATE(wfnkqmpi%isort, (kp%ngkmax,kp%nrk))
+  write(*,*) "inside routine 3, peinf%ntband_max,kp%nrk", peinf%ntband_max,kp%nrk
   SAFE_ALLOCATE(wfnkqmpi%band_index, (peinf%ntband_max,kp%nrk))
+  write(*,*) "inside routine 4"
   SAFE_ALLOCATE(wfnkqmpi%qk, (3,kp%nrk))
+  write(*,*) "inside routine 5"
   SAFE_ALLOCATE(wfnkqmpi%el, (sig%ntband,sig%nspin,kp%nrk))
   ! ZL: ntband_max is total number of bands distributed to each processor
   !     wfnkqmpi%cg is distributed over bands
+  write(*,*) "inside routine 6"
   SAFE_ALLOCATE(wfnkqmpi%cg, (kp%ngkmax,peinf%ntband_max,sig%nspin*kp%nspinor,kp%nrk))
+  write(*,*) "inside routine 7"
 
+  ! OAH: I think because if there is only one k point then q=k, but for more
+  ! than one kpoint, don't have q anymore (or k points beyond the first, don't
+  ! have q anymore)
   if (sig%nkn.gt.1) then  ! ZL: same logic for EP
     ! it is using ngkmax, so same for EP, wfnkmpi%cg is distributed over ndv
     ndvmax=peinf%ndiag_max*kp%ngkmax
@@ -1599,6 +1652,9 @@ subroutine read_hdf5_wavefunctions(kp,gvec,sig,wfnk,fnc,fnk,wfnkqmpi,wfnkmpi,ep_
     SAFE_ALLOCATE(wfnkmpi%el, (sig%ntband,sig%nspin,sig%nkn))
     SAFE_ALLOCATE(wfnkmpi%elda, (sig%ntband,sig%nspin,sig%nkn))
     SAFE_ALLOCATE(wfnkmpi%cg, (ndvmax_l,sig%nspin*kp%nspinor,sig%nkn))
+
+    ! ZL: allocate wfnk_phonq_mpi
+    !     if sig%nkn=1, then no mpi, only use wfnk_phonq which stores k+phonq
   endif
 
 !-----------------------------------
@@ -1608,46 +1664,104 @@ subroutine read_hdf5_wavefunctions(kp,gvec,sig,wfnk,fnc,fnk,wfnkqmpi,wfnkmpi,ep_
   SAFE_ALLOCATE(wfnk%ek, (sig%ntband,sig%nspin))
   SAFE_ALLOCATE(wfnk%elda, (sig%ntband,sig%nspin))
 
+
+  ! Completely remove this when done.
+  ! Just here to advance the binary file so the rest of the calculation works.
+  do irk=1,kp%nrk
+    SAFE_ALLOCATE(temp_components, (3, kp%ngk(irk)))
+    call read_binary_gvectors(25, kp%ngk(irk), kp%ngk(irk), temp_components)
+  enddo
+
+
+  ! OAH: HDF5-specific:
+  ngktot = SUM(kp%ngk)
+  !OAH: this wont be nvownactual ... need to replace w the sigma equivalent
+  SAFE_ALLOCATE(wfns, (ngktot,kp%nspin*kp%nspinor,peinf%ntband_node))
+  SAFE_ALLOCATE(gvec_kpt%components, (3, ngktot))
+
   if(.not.ep_read) then
     call progress_init(prog_info, 'reading wavefunctions (WFN_inner)', 'state', kp%nrk*sig%ntband)
   else
     call progress_init(prog_info, 'reading wavefunctions (dWFN)', 'state', kp%nrk*sig%ntband)
   endif
 
+  ! OAH: HDF5-specific:
+  call logit('Reading G-vectors')
+  call read_hdf5_wfn_gvectors('WFN_inner.h5', gvec_kpt%components, ngktot)
+
+  write(*,*) "ngktot: ", ngktot
+  write(*,*) "gvec_kpt%components(1,1): ", gvec_kpt%components(1,1)
+
   ! ZL: outmost loop, irk over kp%nrk
-  do irk=1,kp%nrk
+  istart=1
+  do irk=1,kp%nrk ! OAH: reading the HDF5 gvectors is not in this loop in eps
     if(.not.ep_read) then
       write(tmpstr,*) 'Reading WFN_inner -> cond/val wfns irk=',irk
     else
       write(tmpstr,*) 'Reading dWFN -> cond/val wfns irk=',irk
     endif
     call logit(tmpstr)
-    qk(:)=kp%rk(:,irk)
+    qk(:)=kp%rk(:,irk) ! epsilon has the same
 
 !----------------------------
 ! Read in and sort gvectors
-    SAFE_ALLOCATE(gvec_kpt%components, (3, kp%ngk(irk)))
-    call timing%start(timing%input_read)
-    call read_binary_gvectors(25, kp%ngk(irk), kp%ngk(irk), gvec_kpt%components)
-    call timing%stop(timing%input_read)
+   ! call timing%start(timing%input_read)
+   ! call timing%stop(timing%input_read)
 
-    do i = 1, kp%ngk(irk)
-      call findvector(isort(i), gvec_kpt%components(:, i), gvec)
-      if (isort(i) .eq. 0) then
-        write(0,*) 'could not find gvec', kp%ngk(irk), i, gvec_kpt%components(1:3, i)
+    SAFE_ALLOCATE(components, (3, kp%ngk(irk)))
+    components(:,:) = gvec_kpt%components(:,istart:istart+kp%ngk(irk)-1)
+    istart=istart+kp%ngk(irk)
+!    do i = 1, kp%ngk(irk)
+!      call findvector(isort(i), gvec_kpt%components(:, i), gvec)
+!      if (isort(i) .eq. 0) then
+!        write(0,*) 'could not find gvec', kp%ngk(irk), i, gvec_kpt%components(1:3, i)
+!        call die('findvector')
+!      endif
+!    enddo
+    do ig = 1, kp%ngk(irk)
+      call findvector(isort(ig), components(:,ig), gvec)
+      if (isort(ig) .eq. 0) then
+        write(0,*) 'could not find gvec', kp%ngk(irk), ig, gvec_kpt%components(1:3, ig)
         call die('findvector')
       endif
     enddo
-    SAFE_DEALLOCATE_P(gvec_kpt%components)
- 
+
+    SAFE_DEALLOCATE(components)
+    write(*,*) "made it to end of major changes"
+    wfnkqmpi%nkptotal(irk) = kp%ngk(irk)
+    wfnkqmpi%isort(1:kp%ngk(irk),irk) = isort(1:kp%ngk(irk)) 
+    do k = 1, sig%nspin
+      wfnkqmpi%el(1:sig%ntband,k,irk) = &
+        kp%el(1+ sig%ncore_excl:sig%ntband+ sig%ncore_excl,irk,sig%spin_index(k))
+    enddo
+    wfnkqmpi%qk(1:3,irk) = qk(1:3)
+
+  end do ! first irk loop
+
+!  call logit("Before interface setup")
+!  call hdf5_open_file('WFN_inner.h5', 'r', file_id, parallel_io=.true.)
+!  ! OAH: for below call need to figure out the sigma equivalent to
+!  ! peinf%does_it_ownv/c and how to handle ib_first
+!  ib_first=peinf%indext_dist(1, peinf%my_pool)
+!  call read_hdf5_bands_block(file_id, kp, peinf%ntband_max, peinf%ntband_node, peinf%does_it_ownt, &
+!    ib_first, wfns)
+
 !--------------------------------------------------------
 ! Determine if Sigma must be computed for this k-point.
 ! If so, store the bands and wavefunctions on file iunit_k.
 ! If there is only one k-point, store directly in wfnk.
 
+! OAH: for now just work under the assumption that all k-points are needed...
+! is wfnk just for one kpoint at a time?
+
+! Or, can make istore an array, then at the end when it says "is this mine" i.e. 
+! is istore=0 or not, we can loop through for each kpoint and say, is
+! istore(current_kpoint) == 0? and copy it over that way.
+  do irk=1,kp%nrk ! OAH: reading the HDF5 gvectors is not in this loop in eps
     istore=0
     do ikn=1,sig%nkn ! ZL: here we take advantage that we implement for one phonq point for now
                      !     otherwize, need another outer loop: do ikn=1,sig%nkn*sig%nphonq
+
       if(sig%indkn(ikn).eq.irk) then  ! ZL: KEY if-statement: here it judges whether store wfnkmpi
         istore=1  ! ZL: for a given irk point, only one ind(ikn) index can match
         iknstore=ikn ! ZL: and this ind(ikn) is recorded as iknstore
@@ -1665,17 +1779,19 @@ subroutine read_hdf5_wavefunctions(kp,gvec,sig,wfnk,fnc,fnk,wfnkqmpi,wfnkmpi,ep_
         SAFE_ALLOCATE(wfnk%zk, (wfnk%ndv,sig%nspin*kp%nspinor))
         wfnk%zk=ZERO
       endif
-
     enddo ! ikn
 
     ! ZL: nkptotal is ngk
-    wfnkqmpi%nkptotal(irk) = kp%ngk(irk)
-    wfnkqmpi%isort(1:kp%ngk(irk),irk) = isort(1:kp%ngk(irk)) 
-    do k = 1, sig%nspin
-      wfnkqmpi%el(1:sig%ntband,k,irk) = &
-        kp%el(1+ sig%ncore_excl:sig%ntband+ sig%ncore_excl,irk,sig%spin_index(k))
-    enddo
-    wfnkqmpi%qk(1:3,irk) = qk(1:3)
+
+    ! OAH: moving all of this to inside the same irk loop that does the gvector
+    ! sorting
+!    wfnkqmpi%nkptotal(irk) = kp%ngk(irk)
+!    wfnkqmpi%isort(1:kp%ngk(irk),irk) = isort(1:kp%ngk(irk)) 
+!    do k = 1, sig%nspin
+!      wfnkqmpi%el(1:sig%ntband,k,irk) = &
+!        kp%el(1+ sig%ncore_excl:sig%ntband+ sig%ncore_excl,irk,sig%spin_index(k))
+!    enddo
+!    wfnkqmpi%qk(1:3,irk) = qk(1:3)
 
 !-------------------------------------------------------------------------
 ! SIB:  Read wave functions from file WFN_inner (ZL: or dWFN) (unit=25) and have
@@ -1726,15 +1842,6 @@ subroutine read_hdf5_wavefunctions(kp,gvec,sig,wfnk,fnc,fnk,wfnkqmpi,wfnkmpi,ep_
           enddo
         endif
 
-        ! ZL: for do_phonq
-        if(do_phonq.and.(istore_ep.eq.1).and.(nstore.ne.0)) then
-          do k=1,sig%nspin*kp%nspinor
-            do j=1,kp%ngk(irk)
-              wfnk_phonq%zk((nstore-1)*kp%ngk(irk)+j,k) = zc(j,sig%spin_index(k))
-            enddo
-          enddo
-        endif
-
 ! DVF : i is indexed including the deep core states (since it runs over all the bands
 ! in the wavefunction), while the indexing arrays
 ! are not. We have to subtract sig%ncore_excl from i to get the right states. 
@@ -1766,6 +1873,7 @@ subroutine read_hdf5_wavefunctions(kp,gvec,sig,wfnk,fnc,fnk,wfnkqmpi,wfnkmpi,ep_
     enddo ! i (loop over bands) ZL: kp%mnband
     SAFE_DEALLOCATE(zc)
 
+    ! OAH this will change to "if istore(irk).eq.1 ..."
     ! ZL: this is the needed kpoint for wfnkmpi, copy from wfnk to wfnkmpi
     if((istore.eq.1).and.(sig%nkn.gt.1)) then  ! ZL: here it stores wfnkmpi
 
@@ -1802,43 +1910,6 @@ subroutine read_hdf5_wavefunctions(kp,gvec,sig,wfnk,fnc,fnk,wfnkqmpi,wfnkmpi,ep_
       ! ZL: if sig%nkn.gt.1, clean wfnk%zk, otherwise (only one kpoint in outer) we keep it
       SAFE_DEALLOCATE_P(wfnk%zk)
     endif
- 
-    ! ZL: for do_phonq
-    if(do_phonq.and.(istore_ep.eq.1).and.(sig%nkn.gt.1)) then
-
-      call timing%start(timing%input_write)
-
-      ikn=iknstore_ep
-      wfnk_phonq_mpi%nkptotal(ikn)=kp%ngk(irk)
-      wfnk_phonq_mpi%isort(1:kp%ngk(irk),ikn)=wfnk_phonq%isrtk(1:kp%ngk(irk))
-      wfnk_phonq_mpi%qk(1:3,ikn)=wfnk_phonq%k(:)
-      wfnk_phonq_mpi%el(1:sig%ntband,1:sig%nspin,ikn)= &
-        wfnk_phonq%ek(1:sig%ntband,1:sig%nspin)
-      wfnk_phonq_mpi%elda(1:sig%ntband,1:sig%nspin,ikn)= &
-        wfnk_phonq%elda(1:sig%ntband,1:sig%nspin)
-      do k=1,sig%nspin*kp%nspinor
-#ifdef MPI
-        i=mod(peinf%inode,peinf%npes/peinf%npools)
-        if (mod(wfnk_phonq%ndv,peinf%npes/peinf%npools).eq.0) then
-          j=wfnk_phonq%ndv/(peinf%npes/peinf%npools)
-        else
-          j=wfnk_phonq%ndv/(peinf%npes/peinf%npools)+1
-        endif
-        g1=1+i*j
-        g2=min(j+i*j,wfnk_phonq%ndv)
-        if (g2.ge.g1) then
-          wfnk_phonq_mpi%cg(1:g2-g1+1,k,ikn)=wfnk_phonq%zk(g1:g2,k)
-        endif ! g2.ge.g1
-#else
-        wfnk_phonq_mpi%cg(1:wfnk_phonq%ndv,k,ikn)=wfnk_phonq%zk(1:wfnk_phonq%ndv,k)
-#endif
-      enddo
-
-      call timing%stop(timing%input_write)
-
-      ! ZL: if sig%nkn.gt.1, remove wfnk%zk, otherwise (only one kpoint in outer) we keep it
-      SAFE_DEALLOCATE_P(wfnk_phonq%zk)
-    endif
 
   enddo ! irk (loop over k-points)
   call progress_free(prog_info)
@@ -1847,9 +1918,7 @@ subroutine read_hdf5_wavefunctions(kp,gvec,sig,wfnk,fnc,fnk,wfnkqmpi,wfnkmpi,ep_
 
   PUSH_SUB(read_wavefunctions)
 
-end subroutine read_hdf5_wavefunctions
+end subroutine read_wavefunctions_hdf5
 
 
 end module input_m
-
-
