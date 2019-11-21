@@ -1620,6 +1620,10 @@ subroutine read_wavefunctions_hdf5(kp, gvec, sig, iunit_c, iunit_k, fnc, fnk, wf
   integer :: error
   integer :: i_oh, j_oh ! OAH remove when done
   integer :: ib_first, iiii, ib, is
+  logical :: is_outer_bands_ctgs=.true. ! find if the outer wavefunctions
+  ! are contiguous in the file. If so, call read_hdf5_bands_block on them
+  ! but otherwise, must loop through and call read_hdf5_band_real/complex
+  ! on each band
 
   PUSH_SUB(read_wavefunctions)
 
@@ -1636,6 +1640,14 @@ subroutine read_wavefunctions_hdf5(kp, gvec, sig, iunit_c, iunit_k, fnc, fnk, wf
   !     wfnkqmpi%cg is distributed over bands
   SAFE_ALLOCATE(wfnkqmpi%cg, (kp%ngkmax,peinf%ntband_max,sig%nspin*kp%nspinor,kp%nrk))
 
+  call determine_ctgs_bands
+
+  if(peinf%inode.eq.0) then
+  write(*,*) "sig%diag:"
+  do ii = 1, sig%ndiag
+        write(*,*) sig%diag(ii)
+  enddo
+endif
   ! OAH in our test case, there is just one 1 kpoint.
   ! This means that our wfnkqmpi%cg indexing may end up changing
   ! since right now it is looping over kpoints, but this suggests there may
@@ -1828,8 +1840,12 @@ subroutine read_wavefunctions_hdf5(kp, gvec, sig, iunit_c, iunit_k, fnc, fnk, wf
   enddo
 
   SAFE_ALLOCATE(wfns, (ngktot,kp%nspin*kp%nspinor,peinf%ndiag_max))
+  ! this will need to change bc read bands block assumes bands are contiguous
+  ! but for the sigma corrections this doesn't necessarily have to be true.
+  ! so look at the serial hdf5 read call for this instead
+  ib_first=sig%diag(1)
   call read_hdf5_bands_block(file_id, kp, peinf%ndiag_max, peinf%ndiag_max, does_it_own_outer,&
-    1, wfns)
+    ib_first, wfns)
 
   do irk=1,kp%nrk
     istore=0
@@ -2105,6 +2121,19 @@ subroutine read_wavefunctions_hdf5(kp, gvec, sig, iunit_c, iunit_k, fnc, fnk, wf
   PUSH_SUB(read_wavefunctions)
 
 end subroutine read_wavefunctions_hdf5
+
+subroutine determine_ctgs_bands(isCtgs)
+
+  logical, intent(inout) :: isCtgs
+  integer :: ii
+
+  do ii = 1, sig%ndiag-1
+    if sig%diag(ii+1) .ne. sig%diag(ii) + 1 then
+      isCtgs=.false.
+    endif
+  enddo
+
+end subroutine determine_ctgs_bands
 
 
 end module input_m
