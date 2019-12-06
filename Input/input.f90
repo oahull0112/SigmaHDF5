@@ -386,8 +386,8 @@ subroutine input(crys,gvec,syms,kp,wpg,sig,wfnk,iunit_c,iunit_k,fnc,fnk,wfnkqmpi
   if (peinf%inode==0) then
     write(*,*) "sig%wfn_hdf5: ", sig%wfn_hdf5
     write(*,*) "Some gvector components: "
-    do i_oh = 1, 20
-      write(*,*) (gvec%components(i_oh,j_oh), j_oh=1,2)
+    do i_oh = 1, 3
+      write(*,*) (gvec%components(i_oh,1))
     end do
   endif
 
@@ -1040,7 +1040,7 @@ subroutine input(crys,gvec,syms,kp,wpg,sig,wfnk,iunit_c,iunit_k,fnc,fnk,wfnkqmpi
 
 
 #ifdef MPI
-  peinf%verb_debug=.true. ! OAH remove when done testing
+ ! peinf%verb_debug=.true. ! OAH remove when done testing
   if (peinf%verb_debug) then
     call logit('Begin distrib report')
     FLUSH(0)
@@ -1414,6 +1414,7 @@ subroutine read_wavefunctions(kp,gvec,sig,wfnk,iunit_c,iunit_k,fnc,fnk,wfnkqmpi,
     SAFE_ALLOCATE(zc, (kp%ngk(irk), kp%nspin*kp%nspinor))
 
     inum=0
+    ! do irk for n kpoints above this.
     do i=1,kp%mnband
 
       call timing%start(timing%input_read)
@@ -1435,24 +1436,40 @@ subroutine read_wavefunctions(kp,gvec,sig,wfnk,iunit_c,iunit_k,fnc,fnk,wfnkqmpi,
          enddo
         endif
 
+        ! OAH: what the below is saying:
+        ! if the global band index i is one that this task is responsible for,
+        ! then (peinf%index_diag(j) = k means j is the local index, k is the
+        ! global band number.) we want to set nstore=j, that is, we want nstore
+        ! to be the value of the LOCAL index of the GLOBAL band i
         nstore=0  ! ZL: for bands
         do j=1,peinf%ndiag_max
           if (.not.peinf%flag_diag(j)) cycle
           if (i==sig%diag(peinf%index_diag(j))) nstore=j
         enddo
 
+        ! What this is doing:
+        ! it determines the local index of the band if it needs to store it
+        ! (above logic), and then if it does need to store it, it copies each g
+        ! vector for each spin over line by line into wfnk%zk, where its
+        ! location in zk is determined by its local index, nstore, and you jump
+        ! kp%ngk(irk) lines between each band you're storing, because that's how
+        ! many gvectors you have (at most) for each band. -- can draw this out
+        ! in a diagram to see how it works.
         ! ZL: if this is the kpoint in outer, save in wfnk
         if((istore.eq.1).and.(nstore.ne.0)) then
           do k=1,sig%nspin*kp%nspinor
             do j=1,kp%ngk(irk)
-              if(peinf%does_it_ownt(i,peinf%inode+1)) then
-                write(*,*)"task:",peinf%inode,"j:",j,"zk(1):",(nstore-1)*kp%ngk(irk)+j,&
-                  "zc val:", zc(j,sig%spin_index(k))
-              endif
               wfnk%zk((nstore-1)*kp%ngk(irk)+j,k) = zc(j,sig%spin_index(k))
             enddo
           enddo
         endif
+
+        ! OAH: handy print statement that was previously inside the do j=1...
+        ! wfnk%zk loop above
+            !  if(peinf%does_it_ownt(i,peinf%inode+1)) then
+            !    write(*,*)"task:",peinf%inode,"j:",j,"zk(1):",(nstore-1)*kp%ngk(irk)+j,&
+            !      "zc val:", zc(j,sig%spin_index(k))
+            !  endif
 
         ! ZL: for do_phonq
         if(do_phonq.and.(istore_ep.eq.1).and.(nstore.ne.0)) then
@@ -1640,14 +1657,16 @@ subroutine read_wavefunctions_hdf5(kp, gvec, sig, iunit_c, iunit_k, fnc, fnk, wf
   !     wfnkqmpi%cg is distributed over bands
   SAFE_ALLOCATE(wfnkqmpi%cg, (kp%ngkmax,peinf%ntband_max,sig%nspin*kp%nspinor,kp%nrk))
 
-  call determine_ctgs_bands
+ ! OAH: come back to this...working on kpoints now but will need to fix this
+ ! eventually -- this is for if the outer bands are not contiguous
+ ! call determine_ctgs_bands
 
-  if(peinf%inode.eq.0) then
-  write(*,*) "sig%diag:"
-  do ii = 1, sig%ndiag
-        write(*,*) sig%diag(ii)
-  enddo
-endif
+!  if(peinf%inode.eq.0) then
+!  write(*,*) "sig%diag:"
+!  do ii = 1, sig%ndiag
+!        write(*,*) sig%diag(ii)
+!  enddo
+!endif
   ! OAH in our test case, there is just one 1 kpoint.
   ! This means that our wfnkqmpi%cg indexing may end up changing
   ! since right now it is looping over kpoints, but this suggests there may
@@ -1655,10 +1674,13 @@ endif
   ! sure...
   if (sig%nkn.gt.1) then  ! ZL: same logic for EP
     ! it is using ngkmax, so same for EP, wfnkmpi%cg is distributed over ndv
+    ! ndvmax=(max number diags for given MPI task)*(lmax number of gvects for
+    ! given kpoint) --> i.e. it is the worst case scenario of diags*gvects
     ndvmax=peinf%ndiag_max*kp%ngkmax
     if (mod(ndvmax,peinf%npes/peinf%npools).eq.0) then
       ndvmax_l=ndvmax/(peinf%npes/peinf%npools)
     else
+      ! worst case diags*gvects divided by number of tasks per pool
       ndvmax_l=ndvmax/(peinf%npes/peinf%npools)+1
     endif
     SAFE_ALLOCATE(wfnkmpi%nkptotal, (sig%nkn))
@@ -1707,8 +1729,6 @@ endif
   call logit('Reading G-vectors')
   call read_hdf5_wfn_gvectors('WFN_inner.h5', gvec_kpt%components, ngktot)
 
-  write(*,*) "ngktot: ", ngktot
-  write(*,*) "gvec_kpt%components(1,1): ", gvec_kpt%components(1,1)
 
   ! ZL: outmost loop, irk over kp%nrk
   istart=1
@@ -1751,20 +1771,21 @@ endif
   call logit("Before interface setup")
   call hdf5_open_file('WFN_inner.h5', 'r', file_id, parallel_io=.true.)
   ib_first=peinf%indext_dist(1, peinf%pool_rank+1)
-  if (peinf%inode==0) then
-    write(*,*) "peinf%indext_dist:"
-    do i_oh=1,peinf%ntband_max
-      write(*,*) (peinf%indext_dist(i_oh,j_oh), j_oh=1,peinf%npes_pool)
-    enddo
-  endif
-  write(*,*) "ib_first inside input: ", ib_first, "for " , peinf%inode
+ ! if (peinf%inode==0) then
+ !   write(*,*) "peinf%indext_dist:"
+ !   do i_oh=1,peinf%ntband_max
+ !     write(*,*) (peinf%indext_dist(i_oh,j_oh), j_oh=1,peinf%npes_pool)
+ !   enddo
+ ! endif
+  !write(*,*) "ib_first inside input: ", ib_first, "for " , peinf%inode
   call read_hdf5_bands_block(file_id, kp, peinf%ntband_max, peinf%ntband_node, peinf%does_it_ownt,&
     ib_first, wfns)
 
-  if (peinf%inode==0) then
-    write(*,*) "part of wfns: "
-    write(*,*) "wfns(1,1,1): ", wfns(1,1,1)
-  endif
+ ! if (peinf%inode==0) then
+ !   write(*,*) "part of wfns: "
+ !   write(*,*) "wfns(1,1,1): ", wfns(1,1,1)
+ !   write(*,*) "wfns(-1, -1, -1)", wfns(ngktot,kp%nspin*kp%nspinor,peinf%ntband_node)
+ ! endif
 
   ! OAH: this part is closely following what happens in Epsilon hdf5 wfn routine
   ! and this works for the test case, but it is not taking into consideration
@@ -1796,15 +1817,24 @@ endif
   do ib=1,peinf%ntband_node 
     istart=1
     do irk=1,kp%nrk
-      iiii=ib+(irk-1)*peinf%ntband_node
+     ! iiii=ib+(irk-1)*peinf%ntband_node
       do is=1,sig%nspin*kp%nspinor
-        wfnkqmpi%cg(1:kp%ngk(irk),iiii,is,irk) &
+       ! wfnkqmpi%cg(1:kp%ngk(irk),iiii,is,irk) &
+       !   = wfns(istart:istart+kp%ngk(irk)-1,sig%spin_index(is),ib)
+        wfnkqmpi%cg(1:kp%ngk(irk),ib,is,irk) &
           = wfns(istart:istart+kp%ngk(irk)-1,sig%spin_index(is),ib)
       end do
-      do is=1,kp%nspin
-        call checknorm('WFN_inner',ib,irk,kp%ngk(irk),is,kp%nspinor, &
-          wfnkqmpi%cg(1:kp%ngk(irk),iiii,:,irk))
-      enddo
+      ! OAH: just added the if so that only node 0 is checking the norm
+      ! but still need to test this...if problems arise, check this
+      if (peinf%inode.eq.0) then
+        do is=1,kp%nspin
+        !  call checknorm('WFN_inner',ib,irk,kp%ngk(irk),is,kp%nspinor, &
+        !    wfnkqmpi%cg(1:kp%ngk(irk),iiii,:,irk))
+          call checknorm('WFN_inner',ib,irk,kp%ngk(irk),is,kp%nspinor, &
+            wfnkqmpi%cg(1:kp%ngk(irk),ib,:,irk))
+        enddo
+      endif
+      ! OAH: can probably move this above the if inode eq 0 check...
       istart=istart+kp%ngk(irk)
     enddo
   enddo
@@ -1824,32 +1854,48 @@ endif
     enddo
   enddo
 
-  write(*,*)"peinf%ndiag_max:" , peinf%ndiag_max
-  write(*,*)"does_it_own_outer:"
-  do i_oh=1,peinf%ndiag_max
-    write(*,*)(does_it_own_outer(i_oh,j_oh), j_oh=1,peinf%npes)
-  enddo
+  ! wfnkqmpi%cg is being read-in properly for each kpoint, it appears.
+!  do irk=1,kp%nrk 
+!    do ib=1,peinf%ntband_node
+!      write(*,*)"irk:", irk, "ib:", ib, "wfnkqmpi(1,1,1,irk):",wfnkqmpi%cg(1,ib,1,irk)
+!    enddo
+!  enddo
+
+!  write(*,*)"peinf%ndiag_max:" , peinf%ndiag_max
+!  write(*,*)"does_it_own_outer:"
+!  do i_oh=1,peinf%ndiag_max
+!    write(*,*)(does_it_own_outer(i_oh,j_oh), j_oh=1,peinf%npes)
+!  enddo
   ! OAH: note that the wfn read in for inner bands is not considering ncore_excl
   ! at all...
 !  ib_first=1+sig%ncore_excl
-  SAFE_DEALLOCATE(wfns)
+
+
+! *******
+!  End of wfnkqmpi stuff, now on to wfnk, wfnkmpi:
+! *******
+
+  SAFE_DEALLOCATE(wfns) ! remove the data in wfns
   outer_ngktot = 0
-  do ii=1,peinf%ndiag_max
-    ! need to get the number of corresponding gvectors inside this loop...
+  do ii=1,peinf%ndiag_max ! recalculate the number of gvectors 
     outer_ngktot = outer_ngktot + kp%ngk(ii)
   enddo
 
   SAFE_ALLOCATE(wfns, (ngktot,kp%nspin*kp%nspinor,peinf%ndiag_max))
   ! this will need to change bc read bands block assumes bands are contiguous
-  ! but for the sigma corrections this doesn't necessarily have to be true.
-  ! so look at the serial hdf5 read call for this instead
+  ! but for the sigma corrections this doesnt necessarily have to be true.
+  ! so look at the serial hdf5 read call for this instead (in Common)
+  ! or hijack the inclusion array machinery
+  ! but at any rate, come back to this once kpoint stuff is working.
   ib_first=sig%diag(1)
   call read_hdf5_bands_block(file_id, kp, peinf%ndiag_max, peinf%ndiag_max, does_it_own_outer,&
     ib_first, wfns)
 
+  istart=1
   do irk=1,kp%nrk
     istore=0
     do ikn=1,sig%nkn
+      ! OAH: this loop should be fine -- no mention of wfns
       if(sig%indkn(ikn).eq.irk)then
         istore=1
         iknstore=ikn
@@ -1867,9 +1913,12 @@ endif
         wfnk%zk=ZERO
       endif
     enddo ! ikn
+
+    ! OAH: the problem child
+!    istart=1
     do i=1,kp%mnband
       nstore=0
-      istart=1
+!      istart=1
       do j=1,peinf%ndiag_max
         if (.not.peinf%flag_diag(j)) cycle
         if (i.eq.sig%diag(peinf%index_diag(j))) nstore=j
@@ -1877,10 +1926,6 @@ endif
       if((istore.eq.1).and.(nstore.ne.0))then
         do k=1,sig%nspin*kp%nspinor
           do j=1,kp%ngk(irk)
-            if(peinf%does_it_ownt(i,peinf%inode+1)) then
-              write(*,*)"task:",peinf%inode,"j:",j,"zk(1):",(nstore-1)*kp%ngk(irk)+j,&
-                "wfns val:", wfns(istart+j-1,sig%spin_index(k),i) 
-            endif
             wfnk%zk((nstore-1)*kp%ngk(irk)+j,k)=& 
               wfns(istart+j-1,sig%spin_index(k),i) ! this is the big q...
              ! wfns(j,sig%spin_index(k),i) ! this is the big q...
@@ -1889,8 +1934,19 @@ endif
           enddo
         enddo
       endif
-      istart=istart+kp%ngk(irk)
+!      istart=istart+kp%ngk(irk)
+      ! loop kpoints --> loop bands --> loop spin --> loop gvecs sort of
     enddo ! i=1,kp%mnband
+    istart=istart+kp%ngk(irk)!*peinf%nvband_node ! maybe multiply kp%ngk(irk)*nbands proc owns
+
+    if (irk.eq.2 .and. peinf%inode.eq.0) then
+      write(*,*) "kpoint: ", irk
+      do i_oh=1,wfnk%ndv
+        write(*,*) (wfnk%zk(i_oh,j_oh), j_oh=1,sig%nspin*kp%nspinor)
+      enddo
+    endif 
+
+    ! peinf%nvband_node
         !  do k=1,sig%nspin*kp%nspinor
         !    wfnkqmpi%cg(1:kp%ngk(irk),inum,k,irk)= &
         !      zc(1:kp%ngk(irk),sig%spin_index(k))
@@ -1907,6 +1963,14 @@ endif
     ! Even though this loop structure is probably not the most
     ! efficient way to do all of the wfnk and wfnkmpi copying,
     ! it should still all work because we have all of the info in wfns already.
+
+
+    ! OAH: useful print statement for cheking: (was previously inside the
+    ! copy-over loop.)
+         !   if(peinf%does_it_ownt(i,peinf%inode+1)) then
+         !     write(*,*)"task:",peinf%inode,"j:",j,"zk(1):",(nstore-1)*kp%ngk(irk)+j,&
+         !       "wfns val:", wfns(istart+j-1,sig%spin_index(k),i) 
+         !   endif
 
     if((istore.eq.1).and.(sig%nkn.gt.1)) then  ! ZL: here it stores wfnkmpi
 
@@ -1945,6 +2009,25 @@ endif
     endif
 
   enddo ! big irk loop
+  ! There is something wrong with the way that we are indexing either wfnk%zk OR
+  ! wfnkmpi%cg ... need to check how BOTH match to the standard, stable BGW code
+  ! I have already checked wfnkqmpi and it seems to work fine
+  ! none of wfnkmpi gets called if there is only one kpoint.
+  
+  ! The thing is, wfnk is only one kpoint at a time.
+  ! So we really need to check both wfnk and wfnkmpi at the same time
+  ! since wfnkmpi is organized how we want it to be
+  ! And this should be fine, because absolutely nothing changes between the
+  ! binary code and the hdf5 code for copying wfnk to wfnkmpi.
+  ! Except that we need to check and make sure istore.eq.1 is working and the
+  ! sames, and iknstore/ikn.
+  do irk=1,kp%nrk 
+    do ib=1,peinf%ntband_node
+     ! write(*,*)"irk:", irk, "ib:", ib, "wfnkqmpi(1,1,1,irk):",wfnkmpi%cg(1,ib,1,irk)
+    !  write(*,*)"irk:", irk, "ib:", ib, "wfnkqmpi(1,1,1,irk):",wfnkqmpi%cg(1,ib,1,irk)
+    !  write(*,*) "irk:", irk, "val:", (nstore-1)*kp%ngk(irk)+j, "wfnk%zk(val, 1)", wfnk%zk((nstore-1)*kp%ngk(irk)+j,1)
+    enddo
+  enddo
 
 !--------------------------------------------------------
 ! Determine if Sigma must be computed for this k-point.
@@ -2122,13 +2205,14 @@ endif
 
 end subroutine read_wavefunctions_hdf5
 
-subroutine determine_ctgs_bands(isCtgs)
+subroutine determine_ctgs_bands(sig, isCtgs)
 
+  type(siginfo), intent(in) :: sig
   logical, intent(inout) :: isCtgs
   integer :: ii
 
   do ii = 1, sig%ndiag-1
-    if sig%diag(ii+1) .ne. sig%diag(ii) + 1 then
+    if ( sig%diag(ii+1) .ne. sig%diag(ii) + 1) then
       isCtgs=.false.
     endif
   enddo
